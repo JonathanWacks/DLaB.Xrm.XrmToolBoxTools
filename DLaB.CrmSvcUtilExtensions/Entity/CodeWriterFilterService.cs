@@ -3,6 +3,7 @@ using Microsoft.Xrm.Sdk.Metadata;
 using System;
 using System.Collections.Generic;
 using Source.DLaB.Common;
+using System.Linq;
 
 namespace DLaB.CrmSvcUtilExtensions.Entity
 {
@@ -14,7 +15,8 @@ namespace DLaB.CrmSvcUtilExtensions.Entity
         /// Contains Meta Data for entities, key'd by logical name
         /// </summary>
         public static Dictionary<string, EntityMetadata> EntityMetadata { get; set; }
-        public WhitelistBlacklistLogic Approver { get; }
+        public WhitelistBlacklistLogic EntityApprover { get; }
+        public IDictionary<string, WhitelistBlacklistLogic> AttributeApprovers { get; }
 
         public bool GenerateEntityRelationships { get; set; }
 
@@ -26,10 +28,12 @@ namespace DLaB.CrmSvcUtilExtensions.Entity
         public CodeWriterFilterService(ICodeWriterFilterService defaultService)
         { 
             DefaultService = defaultService;
-            Approver = new WhitelistBlacklistLogic(Config.GetHashSet("EntitiesWhitelist", new HashSet<string>()),
+            EntityApprover = new WhitelistBlacklistLogic(Config.GetHashSet("EntitiesWhitelist", new HashSet<string>()),
                                                    Config.GetList("EntityPrefixesWhitelist", new List<string>()),
                                                    Config.GetHashSet("EntitiesToSkip", new HashSet<string>()),
                                                    Config.GetList("EntityPrefixesToSkip", new List<string>()));
+            AttributeApprovers = ConfigHelper.GetDictionaryHash("AttributesWhiteList", true)
+                .ToDictionary(kvp => kvp.Key, kvp => new WhitelistBlacklistLogic(kvp.Value, new List<string>(), new HashSet<string>(), new List<string>()));
             GenerateEntityRelationships = ConfigHelper.GetAppSettingOrDefault("GenerateEntityRelationships", true);
         }
 
@@ -51,8 +55,27 @@ namespace DLaB.CrmSvcUtilExtensions.Entity
 
         public bool GenerateAttribute(AttributeMetadata metadata, IServiceProvider services)
         {
-            return EnableFileDataType && IsFileDataTypeAttribute(metadata)
-                   || DefaultService.GenerateAttribute(metadata, services);
+            if(EnableFileDataType && IsFileDataTypeAttribute(metadata))
+            {
+                return true;
+            }
+
+            if(!AttributeApprovers.ContainsKey(metadata.EntityLogicalName))
+            {
+                return false;
+            }
+
+            var attributeApprover = AttributeApprovers[metadata.EntityLogicalName];
+
+            if (!attributeApprover.IsExplicitlyAllowed(metadata.LogicalName)
+                && !DefaultService.GenerateAttribute(metadata, services)) { return false; }
+
+            //if (!EntityMetadata.ContainsKey(entityMetadata.LogicalName))
+            //{
+            //    EntityMetadata.Add(entityMetadata.LogicalName, entityMetadata);
+            //}
+
+            return attributeApprover.IsAllowed(metadata.LogicalName);
         }
 
         private static bool IsFileDataTypeAttribute(AttributeMetadata metadata)
@@ -68,7 +91,7 @@ namespace DLaB.CrmSvcUtilExtensions.Entity
         public bool GenerateEntity(EntityMetadata entityMetadata, IServiceProvider services)
         {
             // Some entities are not normally create (attachment for example) not sure why.  Allowing Whitelist to Override here.
-            if (!Approver.IsExplicitlyAllowed(entityMetadata.LogicalName)
+            if (!EntityApprover.IsExplicitlyAllowed(entityMetadata.LogicalName)
                 && !DefaultService.GenerateEntity(entityMetadata, services)) { return false; }
 
             if (!EntityMetadata.ContainsKey(entityMetadata.LogicalName))
@@ -76,7 +99,7 @@ namespace DLaB.CrmSvcUtilExtensions.Entity
                 EntityMetadata.Add(entityMetadata.LogicalName, entityMetadata);
             }
 
-            return Approver.IsAllowed(entityMetadata.LogicalName);
+            return EntityApprover.IsAllowed(entityMetadata.LogicalName);
         }
 
         public bool GenerateRelationship(RelationshipMetadataBase relationshipMetadata, EntityMetadata otherEntityMetadata, IServiceProvider services)
